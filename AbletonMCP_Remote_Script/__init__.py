@@ -241,7 +241,13 @@ class AbletonMCP(ControlSurface):
                                  "set_device_parameter", "set_device_enabled",
                                  "delete_device", "navigate_preset",
                                  "delete_track",
-                                 "set_track_volume", "set_track_panning"]:
+                                 "set_track_volume", "set_track_panning",
+                                 # W1: session control / selection / scenes
+                                 "set_time_signature", "set_metronome", "set_count_in",
+                                 "create_scene", "delete_scene", "set_scene_name",
+                                 "fire_scene", "stop_all_clips",
+                                 "set_track_mute", "set_track_solo", "set_track_arm",
+                                 "trigger_session_record"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -393,6 +399,50 @@ class AbletonMCP(ControlSurface):
                             ci = params.get("chain_index", None)
                             direction = params.get("direction", "current")
                             result = self._navigate_preset(ti, di, ci, direction)
+                        # W1: session control / selection / scenes
+                        elif command_type == "set_time_signature":
+                            numerator = params.get("numerator", 4)
+                            denominator = params.get("denominator", 4)
+                            result = self._set_time_signature(numerator, denominator)
+                        elif command_type == "set_metronome":
+                            enabled = params.get("enabled", True)
+                            result = self._set_metronome(enabled)
+                        elif command_type == "set_count_in":
+                            duration = params.get("duration", 0)
+                            result = self._set_count_in(duration)
+                        elif command_type == "create_scene":
+                            idx = params.get("index", -1)
+                            result = self._create_scene(idx)
+                        elif command_type == "delete_scene":
+                            idx = params.get("index", 0)
+                            result = self._delete_scene(idx)
+                        elif command_type == "set_scene_name":
+                            idx = params.get("index", 0)
+                            name = params.get("name", "")
+                            result = self._set_scene_name(idx, name)
+                        elif command_type == "fire_scene":
+                            idx = params.get("index", 0)
+                            force_legato = params.get("force_legato", False)
+                            select_on_launch = params.get("can_select_scene_on_launch", True)
+                            result = self._fire_scene(idx, force_legato, select_on_launch)
+                        elif command_type == "stop_all_clips":
+                            quantized = params.get("quantized", True)
+                            result = self._stop_all_clips(quantized)
+                        elif command_type == "set_track_mute":
+                            ti = params.get("track_index", 0)
+                            mute = params.get("mute", False)
+                            result = self._set_track_mute(ti, mute)
+                        elif command_type == "set_track_solo":
+                            ti = params.get("track_index", 0)
+                            solo = params.get("solo", False)
+                            result = self._set_track_solo(ti, solo)
+                        elif command_type == "set_track_arm":
+                            ti = params.get("track_index", 0)
+                            arm = params.get("arm", False)
+                            result = self._set_track_arm(ti, arm)
+                        elif command_type == "trigger_session_record":
+                            record_length = params.get("record_length", None)
+                            result = self._trigger_session_record(record_length)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -445,6 +495,15 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_arrangement_info(track_index)
             elif command_type == "get_cue_points":
                 response["result"] = self._get_cue_points()
+            # W1 read-only: project / selection / transport / scenes
+            elif command_type == "get_project_path":
+                response["result"] = self._get_project_path()
+            elif command_type == "get_selection":
+                response["result"] = self._get_selection()
+            elif command_type == "get_transport_info":
+                response["result"] = self._get_transport_info()
+            elif command_type == "get_scenes":
+                response["result"] = self._get_scenes()
             # Device read-only commands
             elif command_type == "get_device_parameters":
                 ti = params.get("track_index", 0)
@@ -500,15 +559,32 @@ class AbletonMCP(ControlSurface):
             return {"name": "unknown", "error": str(e)}
 
     def _get_transport_info(self):
-        """Serialize Song transport state to TransportInfo dict."""
+        """Serialize Song transport state to TransportInfo dict.
+
+        Extended for W1: transport read-back includes the record state
+        (`record_mode`/`session_record`/`session_record_status`), the metronome
+        and count-in state, and the current position with an explicit unit
+        (`position_unit` = "beats", per the LOM: `current_song_time` is beats).
+        """
         try:
+            current = self._song.current_song_time
             return {
                 "is_playing": self._song.is_playing,
+                "record_mode": self._song.record_mode,
+                "session_record": self._song.session_record,
+                "session_record_status": self._song.session_record_status,
+                "session_automation_record": self._song.session_automation_record,
+                "is_counting_in": self._song.is_counting_in,
+                "count_in_duration": self._song.count_in_duration,
+                "metronome": self._song.metronome,
                 "tempo": self._song.tempo,
                 "signature_numerator": self._song.signature_numerator,
                 "signature_denominator": self._song.signature_denominator,
-                "current_time": self._song.current_song_time,
+                "current_time": current,
+                "current_position_beats": current,
+                "position_unit": "beats",
                 "song_length": self._song.song_length,
+                "start_time": self._song.start_time,
                 "loop_enabled": self._song.loop,
                 "loop_start": self._song.loop_start,
                 "loop_length": self._song.loop_length,
@@ -629,6 +705,8 @@ class AbletonMCP(ControlSurface):
                 "mute": track.mute,
                 "solo": track.solo,
                 "arm": None if is_group else track.arm,
+                "playing_slot_index": track.playing_slot_index,
+                "fired_slot_index": track.fired_slot_index,
                 "volume": track.mixer_device.volume.value,
                 "panning": track.mixer_device.panning.value,
                 "clip_slots": clip_slots,
@@ -1218,6 +1296,323 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error getting cue points: " + str(e))
             raise
+
+    # ── W1: project path / selection / transport / scenes ────────────────
+
+    @staticmethod
+    def _lom_same(a, b, b_ptr=None):
+        """Best-effort identity test for two LOM objects."""
+        if b_ptr is None:
+            b_ptr = getattr(b, "_live_ptr", None)
+        if b_ptr is not None:
+            try:
+                return getattr(a, "_live_ptr", None) == b_ptr
+            except Exception:
+                pass
+        try:
+            return a == b
+        except Exception:
+            return False
+
+    def _lom_index(self, collection, target):
+        """Index of `target` within a LOM list, or -1 if not present."""
+        if target is None:
+            return -1
+        target_ptr = getattr(target, "_live_ptr", None)
+        for i, item in enumerate(collection):
+            if self._lom_same(item, target, target_ptr):
+                return i
+        return -1
+
+    def _locate_clip_slot(self, slot):
+        """Resolve a ClipSlot to {track_index, clip_index, location}."""
+        for ti, track in enumerate(self._song.tracks):
+            idx = self._lom_index(track.clip_slots, slot)
+            if idx >= 0:
+                return {"track_index": ti, "clip_index": idx, "location": "session"}
+        return {}
+
+    def _locate_clip(self, clip):
+        """Resolve a Clip to its track/slot or arrangement position."""
+        ptr = getattr(clip, "_live_ptr", None)
+        for ti, track in enumerate(self._song.tracks):
+            for ci, slot in enumerate(track.clip_slots):
+                if slot.has_clip and self._lom_same(slot.clip, clip, ptr):
+                    return {"track_index": ti, "clip_index": ci,
+                            "location": "session"}
+            for ai, aclip in enumerate(track.arrangement_clips):
+                if self._lom_same(aclip, clip, ptr):
+                    return {"track_index": ti, "clip_index": ai,
+                            "location": "arrangement"}
+        return {}
+
+    def _get_project_path(self):
+        """Return the current Live Set path and name.
+
+        `Song.file_path` is read-only and empty until the set has been saved;
+        this is the LOM replacement for the `$ABLETON_SET_PATH` fallback.
+        """
+        try:
+            path = self._song.file_path
+            return {
+                "file_path": path,
+                "name": self._song.name,
+                "saved": bool(path),
+            }
+        except Exception as e:
+            self.log_message("Error getting project path: " + str(e))
+            raise
+
+    def _get_selection(self):
+        """Return the currently selected track / scene / clip / slot / device."""
+        try:
+            view = self._song.view
+            selected_track = view.selected_track
+            selected_scene = view.selected_scene
+            result = {
+                "selected_track_index": self._lom_index(
+                    self._song.tracks, selected_track),
+                "selected_track_name": getattr(selected_track, "name", None),
+                "selected_scene_index": self._lom_index(
+                    self._song.scenes, selected_scene),
+                "selected_scene_name": getattr(selected_scene, "name", None),
+            }
+
+            slot = getattr(view, "highlighted_clip_slot", None)
+            if slot is not None and getattr(slot, "_live_ptr", 0):
+                location = self._locate_clip_slot(slot)
+                location["has_clip"] = bool(slot.has_clip)
+                result["highlighted_clip_slot"] = location
+
+            clip = getattr(view, "detail_clip", None)
+            if clip is not None and getattr(clip, "_live_ptr", 0):
+                try:
+                    info = {
+                        "name": clip.name,
+                        "is_midi": clip.is_midi_clip,
+                        "is_audio": clip.is_audio_clip,
+                        "is_playing": clip.is_playing,
+                        "length": clip.length,
+                    }
+                except Exception as e:
+                    self.log_message("detail_clip read failed: " + str(e))
+                    info = {}
+                if info:
+                    info.update(self._locate_clip(clip))
+                    result["detail_clip"] = info
+
+            parameter = getattr(view, "selected_parameter", None)
+            if parameter is not None and getattr(parameter, "_live_ptr", 0):
+                result["selected_parameter"] = getattr(parameter, "name", None)
+
+            try:
+                device = selected_track.view.selected_device
+                result["selected_device_name"] = getattr(device, "name", None)
+                result["selected_device_index"] = self._lom_index(
+                    selected_track.devices, device)
+            except Exception:
+                pass
+            return result
+        except Exception as e:
+            self.log_message("Error getting selection: " + str(e))
+            raise
+
+    def _get_scenes(self):
+        """List all scenes with their per-scene properties."""
+        try:
+            scenes = []
+            for i, scene in enumerate(self._song.scenes):
+                scenes.append({
+                    "index": i,
+                    "name": scene.name,
+                    "is_empty": scene.is_empty,
+                    "is_triggered": scene.is_triggered,
+                    "color": scene.color,
+                    "tempo": scene.tempo,
+                    "tempo_enabled": scene.tempo_enabled,
+                    "time_signature_enabled": scene.time_signature_enabled,
+                })
+            return {"scene_count": len(scenes), "scenes": scenes}
+        except Exception as e:
+            self.log_message("Error getting scenes: " + str(e))
+            raise
+
+    def _set_time_signature(self, numerator, denominator):
+        """Set the project time signature (Remote Script W1)."""
+        try:
+            self._song.signature_numerator = int(numerator)
+            self._song.signature_denominator = int(denominator)
+            return {
+                "signature_numerator": self._song.signature_numerator,
+                "signature_denominator": self._song.signature_denominator,
+            }
+        except Exception as e:
+            self.log_message("Error setting time signature: " + str(e))
+            raise
+
+    def _set_metronome(self, enabled):
+        """Enable/disable the metronome (Remote Script W1)."""
+        try:
+            self._song.metronome = bool(enabled)
+            return {"metronome": bool(self._song.metronome)}
+        except Exception as e:
+            self.log_message("Error setting metronome: " + str(e))
+            raise
+
+    def _set_count_in(self, duration):
+        """Set the metronome count-in duration index.
+
+        LOM maps the value as 0=None, 1=1 Bar, 2=2 Bars, 3=4 Bars. This is
+        exposed as get+observe only in the Live 12.1 reference, so on versions
+        that reject the write the returned `applied` is False and `read_back`
+        reports the unchanged value rather than raising.
+        """
+        try:
+            self._song.count_in_duration = int(duration)
+            read_back = int(self._song.count_in_duration)
+            return {"requested": int(duration), "count_in_duration": read_back,
+                    "applied": read_back == int(duration)}
+        except Exception as e:
+            self.log_message("Error setting count-in: " + str(e))
+            return {"requested": int(duration),
+                    "count_in_duration": int(self._song.count_in_duration),
+                    "applied": False, "error": str(e)}
+
+    def _create_scene(self, index=-1):
+        """Create a scene at `index` (-1 = end); return its index/name."""
+        try:
+            before = len(self._song.scenes)
+            result = self._song.create_scene(index)
+            new_index = -1
+            if result is not None:
+                new_index = self._lom_index(self._song.scenes, result)
+            if new_index < 0:
+                new_index = before if index == -1 else index
+            scene = self._song.scenes[new_index]
+            return {"index": new_index, "name": scene.name,
+                    "scene_count": len(self._song.scenes)}
+        except Exception as e:
+            self.log_message("Error creating scene: " + str(e))
+            raise
+
+    def _delete_scene(self, index):
+        """Delete the scene at `index` (Remote Script W1)."""
+        try:
+            if index < 0 or index >= len(self._song.scenes):
+                raise IndexError("Scene index {0} out of range (0-{1})".format(
+                    index, len(self._song.scenes) - 1))
+            self._song.delete_scene(index)
+            return {"deleted_index": index,
+                    "scene_count": len(self._song.scenes)}
+        except Exception as e:
+            self.log_message("Error deleting scene: " + str(e))
+            raise
+
+    def _set_scene_name(self, index, name):
+        """Rename the scene at `index` (Remote Script W1)."""
+        try:
+            if index < 0 or index >= len(self._song.scenes):
+                raise IndexError("Scene index {0} out of range".format(index))
+            scene = self._song.scenes[index]
+            scene.name = name
+            return {"index": index, "name": scene.name}
+        except Exception as e:
+            self.log_message("Error renaming scene: " + str(e))
+            raise
+
+    def _fire_scene(self, index, force_legato=False,
+                    can_select_scene_on_launch=True):
+        """Fire the scene at `index` (Remote Script W1)."""
+        try:
+            if index < 0 or index >= len(self._song.scenes):
+                raise IndexError("Scene index {0} out of range".format(index))
+            scene = self._song.scenes[index]
+            try:
+                scene.fire(bool(force_legato), bool(can_select_scene_on_launch))
+            except TypeError:
+                scene.fire()
+            return {"index": index, "fired": True,
+                    "is_triggered": scene.is_triggered}
+        except Exception as e:
+            self.log_message("Error firing scene: " + str(e))
+            raise
+
+    def _stop_all_clips(self, quantized=True):
+        """Stop all playing session clips (Remote Script W1)."""
+        try:
+            try:
+                self._song.stop_all_clips(bool(quantized))
+            except TypeError:
+                self._song.stop_all_clips()
+            return {"stopped": True, "quantized": bool(quantized)}
+        except Exception as e:
+            self.log_message("Error stopping all clips: " + str(e))
+            raise
+
+    def _set_track_mute(self, track_index, mute):
+        """Set a track's mute state (Remote Script W1)."""
+        try:
+            track = self._resolve_track(track_index)
+            track.mute = bool(mute)
+            return {"track_index": track_index, "name": track.name,
+                    "mute": bool(track.mute)}
+        except Exception as e:
+            self.log_message("Error setting track mute: " + str(e))
+            raise
+
+    def _set_track_solo(self, track_index, solo):
+        """Set a track's solo state (Remote Script W1)."""
+        try:
+            track = self._resolve_track(track_index)
+            track.solo = bool(solo)
+            return {"track_index": track_index, "name": track.name,
+                    "solo": bool(track.solo)}
+        except Exception as e:
+            self.log_message("Error setting track solo: " + str(e))
+            raise
+
+    def _set_track_arm(self, track_index, arm):
+        """Set a track's record-arm state (Remote Script W1)."""
+        try:
+            track = self._resolve_track(track_index)
+            if not getattr(track, "can_be_armed", False):
+                raise ValueError(
+                    "Track '{0}' cannot be armed".format(track.name))
+            track.arm = bool(arm)
+            return {"track_index": track_index, "name": track.name,
+                    "arm": bool(track.arm)}
+        except Exception as e:
+            self.log_message("Error setting track arm: " + str(e))
+            raise
+
+    def _trigger_session_record(self, record_length=None):
+        """Start/stop Session recording on the armed track (Remote Script W1).
+
+        Follows the LOM: records into the selected slot (or the next empty one)
+        of an armed track. A `record_length` in beats limits the take; calling
+        again while recording stops it and starts clip playback.
+        """
+        try:
+            if record_length is None:
+                self._song.trigger_session_record()
+            else:
+                self._song.trigger_session_record(float(record_length))
+            return {
+                "session_record_status": self._song.session_record_status,
+                "record_mode": self._song.record_mode,
+                "is_playing": self._song.is_playing,
+            }
+        except Exception as e:
+            self.log_message("Error triggering session record: " + str(e))
+            raise
+
+    def _resolve_track(self, track_index):
+        """Return a session track by index with a clear bounds error."""
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError(
+                "Track index {0} out of range (0-{1})".format(
+                    track_index, len(self._song.tracks) - 1))
+        return self._song.tracks[track_index]
 
     def _set_song_time(self, time):
         """Set playback position."""
