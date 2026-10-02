@@ -452,6 +452,11 @@ class AbletonMCP(ControlSurface):
                 ci = params.get("chain_index", None)
                 show_all = params.get("show_all", False)
                 response["result"] = self._get_device_parameters(ti, di, ci, show_all)
+            elif command_type == "get_parameter_names":
+                ti = params.get("track_index", 0)
+                di = params.get("device_index", 0)
+                ci = params.get("chain_index", None)
+                response["result"] = self._get_parameter_names(ti, di, ci)
             elif command_type == "get_chain_info":
                 ti = params.get("track_index", 0)
                 di = params.get("device_index", 0)
@@ -1505,6 +1510,49 @@ class AbletonMCP(ControlSurface):
             raise
 
     # ── Device command handlers ──────────────────────────────────────
+
+    def _get_parameter_names(self, track_index, device_index, chain_index=None):
+        """Return a plugin's own declared parameter names, if Live exposes them.
+
+        `device.parameters` reports only the *exposed* parameter strip. A
+        PluginDevice may additionally answer `get_parameter_names()`, which
+        returns the plugin's full declared list; its index in that list is the
+        value that belongs in an .als slot's `ParameterId` field. That method is
+        confirmed on Live 12.4.5 and UNVERIFIED on 12.1, so this reports
+        `method_present` rather than raising when it is absent. Its signature is
+        also unverified: call it with no arguments first.
+        """
+        track, device = self._resolve_device(track_index, device_index)
+        target_device = device
+        if chain_index is not None:
+            if not device.can_have_chains:
+                raise ValueError("Device '{0}' is not a rack".format(device.name))
+            chain = device.chains[chain_index]
+            if not chain.devices:
+                raise ValueError("Chain '{0}' has no devices".format(chain.name))
+            target_device = chain.devices[0]
+
+        method = getattr(target_device, "get_parameter_names", None)
+        base = {
+            "device_name": target_device.name,
+            "device_class": target_device.class_name,
+        }
+        if method is None:
+            base.update({"method_present": False, "count": None, "names": [],
+                         "error": "get_parameter_names not present on this device/Live version"})
+            return base
+        try:
+            names = method()
+        except Exception as e:
+            base.update({"method_present": True, "count": None, "names": [],
+                         "error": "call failed: {0}".format(e)})
+            return base
+        try:
+            names = [str(n) for n in names]
+        except TypeError:
+            names = [str(names)]
+        base.update({"method_present": True, "count": len(names), "names": names})
+        return base
 
     def _get_device_parameters(self, track_index, device_index, chain_index=None, show_all=False):
         """Return parameter list for a device."""
